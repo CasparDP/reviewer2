@@ -50,6 +50,40 @@ A default run takes 15 to 45 minutes and costs a few dollars in Gemini
 usage. It produces the core review plus the author-facing copyedit and
 editor's-note stages. The math and code audits are opt-in (see Add-ons).
 
+## Input files
+
+Three kinds of input can be passed in.
+
+- **The main PDF.** The positional argument; always required.
+
+  ```bash
+  reviewer2 paper.pdf
+  ```
+
+- **Supplementary PDFs.** Pass `--supp PATH` for each supplementary file;
+  the flag is repeatable. Supplements are merged after the main paper and
+  visible to every stage except the math Proofreader, which reads the
+  main-only PDF so that equation OCR is not confused by material from the
+  supplements.
+
+  ```bash
+  reviewer2 paper.pdf --supp appendix.pdf --supp online_appendix.pdf
+  ```
+
+- **A replication-code directory.** Pass `--code-dir PATH` to enable the
+  code-audit add-on. Any text source files in the directory (R, Python,
+  Stata and so on) are compiled into a single PDF and attached behind the
+  paper for the code-audit stages.
+
+  ```bash
+  reviewer2 paper.pdf --code-dir ./replication/
+  ```
+
+A volume circuit breaker halts the run if the combined page count of
+paper, supplements and compiled code exceeds 500 pages. Override with
+`--skip-size-check` when a legitimately large package needs to get
+through.
+
 ## What the report contains
 
 The default report has four sections:
