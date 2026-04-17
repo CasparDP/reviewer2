@@ -126,7 +126,7 @@ def run(
     work_dir: str | Path,
     *,
     math: bool = False,
-    code: bool = True,
+    code: bool = False,
     copyedit: bool = True,
     editor_note: bool = True,
     supp_pdfs: list[str | Path] | None = None,
@@ -146,7 +146,7 @@ def run(
             last successfully written stage.
         math: Enable math-audit stages. Requires ``MATHPIX_APP_ID`` and
             ``MATHPIX_APP_KEY`` in the environment.
-        code: Enable code / replication-audit stages. Requires ``code_dir``.
+        code: Enable code / replication-audit stages. Off by default; requires ``code_dir``.
         copyedit: Enable copyedit stages (Writer Mode). ``editor_note`` is
             also required for these stages to run — they share inputs.
         editor_note: Enable the editor's-note stage. See ``copyedit``.

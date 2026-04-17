@@ -26,25 +26,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Enable the math-audit stages. Requires MATHPIX_APP_ID and MATHPIX_APP_KEY.",
     )
     parser.add_argument(
-        "--no-code", action="store_true",
-        help="Skip the code / replication-audit stages.",
+        "--code-dir", default=None, metavar="PATH",
+        help="Path to a directory of replication source code. Passing this "
+             "flag enables the code-audit add-on (off by default).",
     )
     parser.add_argument(
         "--no-copyedit", action="store_true",
-        help="Skip the copyedit / polish stages.",
+        help="Skip the copyedit stages (proofreading and revision suggestions).",
     )
     parser.add_argument(
         "--no-editor-note", action="store_true",
-        help="Skip the editor's note stage. (In this release, copyedit and editor's "
-             "note are coupled — disabling either skips all Writer-Mode stages.)",
+        help="Skip the editor's-note stage (the Alchemist's revision advice). "
+             "In this release, copyedit and editor's note are coupled: disabling "
+             "either skips all Writer-Mode stages.",
     )
     parser.add_argument(
         "--base", action="store_true",
         help="Base review only. Disables every add-on: math, code, copyedit, editor's note.",
-    )
-    parser.add_argument(
-        "--code-dir", default=None,
-        help="Directory of source-code files for the code-audit add-on.",
     )
     parser.add_argument(
         "--supp", action="append", default=[], metavar="PDF",
@@ -78,7 +76,7 @@ def resolve_addons(args: argparse.Namespace) -> dict[str, bool]:
         return {"math": False, "code": False, "copyedit": False, "editor_note": False}
     return {
         "math": args.math,
-        "code": not args.no_code,
+        "code": bool(args.code_dir),
         "copyedit": not args.no_copyedit,
         "editor_note": not args.no_editor_note,
     }
@@ -104,10 +102,6 @@ def main(argv: list[str] | None = None) -> int:
     if addons["math"]:
         _require_env("MATHPIX_APP_ID", "for the --math add-on")
         _require_env("MATHPIX_APP_KEY", "for the --math add-on")
-    if addons["code"] and not args.code_dir:
-        print("note: --code is enabled but no --code-dir given; code-audit stages will be skipped.",
-              file=sys.stderr)
-
     output_path = Path(args.output).expanduser().resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
