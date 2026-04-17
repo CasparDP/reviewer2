@@ -92,12 +92,6 @@ fact-checking, review drafting, and final assembly. Each stage is a prompt in
 the `prompts/` directory. Stage outputs are written as `.txt` files into a
 working directory and chained together.
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the stage graph and dependencies.
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md).
-
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
