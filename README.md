@@ -7,7 +7,7 @@ produces a plain-text critical review that surfaces methodological errors,
 data inconsistencies, and logical flaws. It is the open-source pipeline behind
 the paid service at [isitcredible.com](https://isitcredible.com/).
 
-**Status:** pre-release (0.1.0). APIs will change.
+**Version:** 1.0.0. First public release. The hosted service at isitcredible.com will continue to evolve past this snapshot; breaking changes here will bump the major version per semver.
 
 ## Requirements
 
