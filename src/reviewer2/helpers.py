@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import csv
 import io
 import os
 import re
 import zipfile
 
-from reviewer2.core import call_gemini, load_prompt
-from reviewer2.paths import prompts_dir, pricing_csv
+from reviewer2.core import call_llm, load_prompt
+from reviewer2.paths import prompts_dir
 
 CODE_ALLOWED_EXTENSIONS = {
     ".py", ".r", ".do", ".ado", ".rmd", ".ipynb", ".jl", ".m",
@@ -80,7 +79,7 @@ def validate_pdf_structure(pdf_path):
     )
 
     try:
-        response = call_gemini(
+        response = call_llm(
             prompt, pdf_path, model_type="flash_lite", temperature=0.0,
             system_instruction="You are a Quality Control bot. Reply strictly as requested.",
         )
@@ -186,72 +185,31 @@ def inject_page_numbers(prompt, metadata, is_code_stage=False):
 
 
 def calculate_cost(usage_log, pricing_path=None):
-    """Print a per-stage cost breakdown, return the total in dollars."""
+    """Print a per-stage token usage summary."""
     print("\n╔═══════════════════════════════════════════════════╗")
-    print("║            FINAL TOKEN & COST REPORT              ║")
+    print("║              FINAL TOKEN USAGE REPORT             ║")
     print("╚═══════════════════════════════════════════════════╝")
 
-    if pricing_path is None:
-        pricing_path = pricing_csv()
-    pricing_path = str(pricing_path)
-
-    if not os.path.exists(pricing_path):
-        print(f"  ⚠ pricing CSV not found at {pricing_path}.")
-        return 0.0
-
     if not usage_log:
+        print("  (no usage recorded)")
         return 0.0
 
-    prices = {}
-    with open(pricing_path, newline="", encoding="utf-8") as f:
-        for row in csv.DictReader(f):
-            prices[row["model_name"]] = {
-                "input_price_low": float(row["input_price_low"]),
-                "output_price_low": float(row["output_price_low"]),
-                "input_price_high": float(row["input_price_high"]),
-                "output_price_high": float(row["output_price_high"]),
-                "cutoff": int(row.get("cutoff") or 128000),
-            }
-
-    total_cost = 0.0
-    step_costs: dict[str, float] = {}
-
-    print(f"\n{'Step':<30} | {'Model':<25} | {'In Tok':<8} | {'Out Tok':<8} | {'Cost':<10}")
-    print("-" * 95)
+    total_in = total_out = 0
+    print(f"\n{'Step':<30} | {'Model':<25} | {'In Tok':<10} | {'Out Tok':<10}")
+    print("-" * 85)
 
     for entry in usage_log:
         step = entry.get("step", "unknown")
-        model = entry["model_name"]
-        in_tok = entry["input_tokens"]
-        out_tok = entry["output_tokens"]
+        model = entry.get("model_name", "unknown")
+        in_tok = entry.get("input_tokens", 0)
+        out_tok = entry.get("output_tokens", 0)
+        total_in += in_tok
+        total_out += out_tok
+        print(f"{step:<30} | {model:<25} | {in_tok:<10,.0f} | {out_tok:<10,.0f}")
 
-        price = prices.get(model)
-        if not price:
-            print(f"{step:<30} | {model:<25} | {in_tok:<8.0f} | {out_tok:<8.0f} | MISSING")
-            continue
-
-        is_high = in_tok > price["cutoff"]
-        p_in = price["input_price_high"] if is_high else price["input_price_low"]
-        p_out = price["output_price_high"] if is_high else price["output_price_low"]
-        c_in = (in_tok / 1e6) * p_in
-        c_out = (out_tok / 1e6) * p_out
-        entry_cost = c_in + c_out
-
-        total_cost += entry_cost
-        step_costs[step] = step_costs.get(step, 0) + entry_cost
-        print(f"{step:<30} | {model:<25} | {in_tok:<8.0f} | {out_tok:<8.0f} | ${entry_cost:.4f}")
-
-    print("\n" + "-" * 95)
-    print(f"\n{'COST BY STEP SUMMARY':^95}")
-    print("-" * 50)
-
-    for step, cost in sorted(step_costs.items(), key=lambda x: x[1], reverse=True):
-        pct = (cost / total_cost * 100) if total_cost > 0 else 0
-        print(f"  {step:<35} ${cost:.4f}  ({pct:5.1f}%)")
-
-    print("-" * 50)
-    print(f"  {'TOTAL ESTIMATED COST':<35} ${total_cost:.4f}\n")
-    return total_cost
+    print("-" * 85)
+    print(f"{'TOTAL':<30} | {'':<25} | {total_in:<10,.0f} | {total_out:<10,.0f}\n")
+    return 0.0
 
 
 def sanitize_math_for_latex(text):
@@ -277,5 +235,5 @@ def is_output_truncated(text):
     Reply with exactly one word: YES or NO.
     """
 
-    result = call_gemini(prompt, model_type="flash_lite", thinking_budget=0, temperature=0.0)
+    result = call_llm(prompt, model_type="flash_lite", temperature=0.0)
     return "YES" in result.strip().upper()

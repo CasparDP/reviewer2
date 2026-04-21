@@ -1,8 +1,7 @@
-"""Gemini API client with upload caching, retry logic, and PDF tools."""
+"""LLM client (OpenAI-compatible) with retry logic and PDF text cache."""
 
 from __future__ import annotations
 
-import atexit
 import os
 import re
 import shutil
@@ -10,302 +9,149 @@ import subprocess
 import tempfile
 import time
 from datetime import datetime
-
 from pathlib import Path
 
-from google import genai
-from google.genai import types
-from google.genai.types import HarmBlockThreshold, HarmCategory, SafetySetting
+from openai import OpenAI
 from pypdf import PdfReader, PdfWriter
 
+from reviewer2.config import Config, load_config
 from reviewer2.paths import prompts_dir
 
-# Per-call usage records. Appended by call_gemini, consumed by helpers.calculate_cost.
+# Per-call usage records.
 USAGE_LOG: list[dict] = []
 
-# { local_file_path: uploaded_gemini_file_object }. Reset with cleanup_resources.
-_FILE_CACHE: dict[str, object] = {}
+# { local_file_path: markdown_text } — populated by pipeline before stages run.
+_PDF_TEXT_CACHE: dict[str, str] = {}
 
-MODELS = {
-    "flash_lite": "gemini-2.5-flash-lite",
-    "flash_lite_3": "gemini-3.1-flash-lite-preview",
-    "flash_2_5": "gemini-2.5-flash",
-    "flash_3": "gemini-3-flash-preview",
-    "pro_2_5": "gemini-2.5-pro",
-    "pro_3": "gemini-3-pro-preview",
-    "pro_3_1": "gemini-3.1-pro-preview",
-}
+# Lazy-loaded config singleton (overridable by passing config= to call_llm).
+_config: Config | None = None
 
 
-def get_or_upload_file(client, file_path, force_upload=False):
-    """Upload a PDF to Gemini once per session; reuse the handle after that."""
-    global _FILE_CACHE
-
-    if not force_upload and file_path in _FILE_CACHE:
-        return _FILE_CACHE[file_path]
-
-    print(f"    ↳ 📤 Uploading NEW file to Gemini: {os.path.basename(file_path)}...")
-    try:
-        uploaded_file = client.files.upload(file=file_path)
-        _FILE_CACHE[file_path] = uploaded_file
-        print(f"    ✓ Upload complete: {uploaded_file.name} (Cached)")
-        return uploaded_file
-    except Exception as e:
-        if file_path in _FILE_CACHE:
-            del _FILE_CACHE[file_path]
-        raise IOError(f"Error uploading PDF '{file_path}': {e}")
+def _get_config() -> Config:
+    global _config
+    if _config is None:
+        _config = load_config()
+    return _config
 
 
-def cleanup_resources():
-    """Delete every remote file uploaded during this session."""
-    global _FILE_CACHE
-    if not _FILE_CACHE:
-        return
-
-    print("\n🧹 Cleaning up Gemini resources...")
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        return
-
-    try:
-        client = genai.Client(api_key=api_key)
-        for _path, file_obj in list(_FILE_CACHE.items()):
-            try:
-                client.files.delete(name=file_obj.name)
-                print(f"  ✓ Deleted remote file: {file_obj.name}")
-            except Exception as e:
-                if "404" not in str(e):
-                    print(f"  ⚠ Failed to delete {file_obj.name}: {e}")
-        _FILE_CACHE.clear()
-    except Exception as e:
-        print(f"  ⚠ Cleanup initialization failed: {e}")
+def _resolve_model(model_type: str, config: Config) -> str:
+    """Map model_type tier to the configured model name."""
+    if model_type.startswith("flash"):
+        return config.provider.fast_model
+    if model_type.startswith("pro"):
+        return config.provider.strong_model
+    # Unknown type: treat as a literal model name.
+    return model_type
 
 
-atexit.register(cleanup_resources)
-
-
-def call_gemini(
-    prompt=None,
-    pdf_file_path=None,
-    model_type="flash_lite",
-    temperature=0.1,
-    thinking_level=None,
-    thinking_budget=None,
-    media_resolution="MEDIA_RESOLUTION_MEDIUM",
-    system_instruction=None,
-    max_retries=10,
-    retry_forever_on_rate_limit=True,
-    step=None,
-    use_search=False,
-    max_output_tokens=None,
-):
-    """Call Gemini with retries, PDF caching, and structured thinking support.
-
-    ``GEMINI_MODEL_OVERRIDE`` in the environment forces every call to a single
-    model, useful for cheap smoke runs against Flash Lite.
-    """
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise ValueError("GEMINI_API_KEY not found in environment")
-
-    override = os.environ.get("GEMINI_MODEL_OVERRIDE")
-    if override:
-        model_type = override
-
-    model_name = MODELS.get(model_type, model_type)
-    if not model_name:
-        print(f"  ⚠  Warning: Unknown model_type '{model_type}', falling back to flash_lite")
-        model_name = MODELS["flash_lite"]
-
-    http_options = types.HttpOptions(client_args={"timeout": None})
-    client = genai.Client(api_key=api_key, http_options=http_options)
-
-    safety_settings = [
-        SafetySetting(category=HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold=HarmBlockThreshold.BLOCK_NONE),
-        SafetySetting(category=HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold=HarmBlockThreshold.BLOCK_NONE),
-        SafetySetting(category=HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold=HarmBlockThreshold.BLOCK_NONE),
-        SafetySetting(category=HarmCategory.HARM_CATEGORY_HARASSMENT, threshold=HarmBlockThreshold.BLOCK_NONE),
-    ]
-
-    thinking_cfg = None
-    model_supports_thinking = (
-        "pro" in model_type or "2.5" in model_type or "flash" in model_type or "3" in model_name
+def _make_client(config: Config) -> OpenAI:
+    return OpenAI(
+        api_key=config.provider.api_key or "no-key",
+        base_url=config.provider.base_url,
     )
-    if model_supports_thinking:
-        if thinking_budget is not None:
-            thinking_cfg = types.ThinkingConfig(thinking_budget=int(thinking_budget))
-        elif thinking_level:
-            thinking_cfg = types.ThinkingConfig(thinking_level=thinking_level, include_thoughts=False)
-        else:
-            thinking_cfg = types.ThinkingConfig(thinking_budget=-1)
 
-    tools = None
-    if use_search:
-        tools = [types.Tool(google_search=types.GoogleSearch())]
+
+def call_llm(
+    prompt: str | None = None,
+    pdf_file_path: str | None = None,
+    model_type: str = "flash_lite",
+    temperature: float | None = None,
+    system_instruction: str | None = None,
+    max_retries: int = 10,
+    retry_forever_on_rate_limit: bool = True,
+    step: str | None = None,
+    max_output_tokens: int | None = None,
+    config: Config | None = None,
+) -> str:
+    """Call an OpenAI-compatible LLM with retries.
+
+    If pdf_file_path is given, the cached markdown for that path is injected
+    at the top of the prompt (populated by pipeline via _PDF_TEXT_CACHE).
+    """
+    cfg = config or _get_config()
+    model_name = _resolve_model(model_type, cfg)
+
+    # Build the user message content.
+    content_parts: list[str] = []
+    if pdf_file_path:
+        cached_text = _PDF_TEXT_CACHE.get(pdf_file_path)
+        if cached_text:
+            content_parts.append(f"<paper>\n{cached_text}\n</paper>")
+        else:
+            print(f"  ⚠  No cached text for {pdf_file_path}; PDF content will be missing.")
+    if prompt:
+        content_parts.append(prompt)
+
+    user_content = "\n\n".join(content_parts)
+
+    messages: list[dict] = []
+    if system_instruction:
+        messages.append({"role": "system", "content": system_instruction})
+    messages.append({"role": "user", "content": user_content})
+
+    client = _make_client(cfg)
 
     attempt = 0
     base_delay = 5
     max_delay = 300
-    has_forced_reupload = False
 
     while True:
         attempt += 1
-
-        parts = []
-        if pdf_file_path:
-            force = attempt > 1 and has_forced_reupload
-            try:
-                current_uploaded_file = get_or_upload_file(client, pdf_file_path, force_upload=force)
-                has_forced_reupload = False
-                parts.append(types.Part.from_uri(
-                    file_uri=current_uploaded_file.uri,
-                    mime_type="application/pdf",
-                ))
-            except Exception as e:
-                print(f"    ⚠  Upload failed inside retry loop: {e}")
-                time.sleep(5)
-                continue
-
-        if prompt:
-            parts.append(types.Part.from_text(text=prompt))
-
-        contents = [types.Content(role="user", parts=parts)]
-
-        formatted_system_instruction = None
-        if system_instruction:
-            formatted_system_instruction = [types.Part.from_text(text=system_instruction)]
-
-        gen_config = types.GenerateContentConfig(
-            temperature=temperature,
-            system_instruction=formatted_system_instruction,
-            thinking_config=thinking_cfg,
-            media_resolution=media_resolution,
-            safety_settings=safety_settings,
-            tools=tools,
-            max_output_tokens=max_output_tokens,
-        )
-
         try:
-            response = client.models.generate_content(
-                model=model_name,
-                contents=contents,
-                config=gen_config,
-            )
+            kwargs: dict = {
+                "model": model_name,
+                "messages": messages,
+                "temperature": temperature if temperature is not None else cfg.provider.temperature,
+            }
+            if max_output_tokens:
+                kwargs["max_tokens"] = max_output_tokens
 
-            if response is None:
-                raise ValueError("API returned None response object")
+            response = client.chat.completions.create(**kwargs)
 
-            usage_meta = getattr(response, "usage_metadata", None)
-            if usage_meta:
-                p_tok = getattr(usage_meta, "prompt_token_count", 0) or 0
-                c_tok = getattr(usage_meta, "candidates_token_count", 0) or 0
-                t_tok = getattr(usage_meta, "thoughts_token_count", 0) or 0
+            usage = getattr(response, "usage", None)
+            if usage:
                 USAGE_LOG.append({
                     "model_name": model_name,
-                    "input_tokens": p_tok,
-                    "output_tokens": c_tok + t_tok,
-                    "thoughts_tokens": t_tok,
+                    "input_tokens": getattr(usage, "prompt_tokens", 0) or 0,
+                    "output_tokens": getattr(usage, "completion_tokens", 0) or 0,
                     "timestamp": datetime.now().isoformat(),
                     "step": step or "unknown",
                 })
 
-            try:
-                feedback = getattr(response, "prompt_feedback", None)
-                if feedback and getattr(feedback, "block_reason", None):
-                    error_msg = f"FATAL: Prompt blocked by filters: {feedback.block_reason}"
-                    print(f"    ❌ {error_msg}")
-                    raise RuntimeError(error_msg)
-
-                candidates = getattr(response, "candidates", []) or []
-                if not candidates:
-                    raise ValueError("No candidates returned (Possible Safety Block or Empty Response)")
-
-                first_cand = candidates[0]
-                finish_reason = str(getattr(first_cand, "finish_reason", "UNKNOWN"))
-                valid_reasons = ["STOP", "1", "FinishReason.STOP", "MAX_TOKENS", "2", "FinishReason.MAX_TOKENS"]
-
-                if finish_reason not in valid_reasons:
-                    safety_ratings = getattr(first_cand, "safety_ratings", "Unknown")
-                    error_msg = f"FATAL: Generation stopped. Reason: {finish_reason}. Ratings: {safety_ratings}"
-                    print(f"    ❌ {error_msg}")
-                    raise RuntimeError(error_msg)
-
-                if thinking_cfg:
-                    final_text = []
-                    content = getattr(first_cand, "content", None)
-                    parts = getattr(content, "parts", None)
-                    if parts is None:
-                        if "MAX_TOKENS" in str(finish_reason):
-                            raise ValueError(f"FATAL: Model hit MAX_TOKENS and returned no content. (Finish Reason: {finish_reason})")
-                        raise ValueError(f"API returned malformed content: 'parts' is None (Finish Reason: {finish_reason})")
-                    for part in parts:
-                        if part.text and not getattr(part, "thought", False):
-                            final_text.append(part.text)
-                    result = "".join(final_text).strip()
-                else:
-                    if hasattr(response, "text") and response.text:
-                        result = response.text
-                    else:
-                        content = getattr(first_cand, "content", None)
-                        parts = getattr(content, "parts", None)
-                        if parts and len(parts) > 0:
-                            result = parts[0].text
-                        else:
-                            raise ValueError("Standard model returned no text parts.")
-
-                if not result or not result.strip():
-                    raise ValueError("API returned empty string")
-                return result
-
-            except Exception as e:
-                if "FATAL" in str(e):
-                    raise
-                if "API returned malformed content" in str(e):
-                    raise
-                raise ValueError(f"Failed to extract text from response: {e}")
+            result = response.choices[0].message.content
+            if not result or not result.strip():
+                raise ValueError("API returned empty string")
+            return result
 
         except Exception as e:
             err_str = str(e)
 
             if "FATAL" in err_str:
                 raise
-            if "'NoneType' object is not iterable" in err_str:
-                print("    ✗ FATAL ERROR: Malformed API response (NoneType iterable). Stopping.")
-                raise
-
-            if "403" in err_str and ("access the File" in err_str or "PERMISSION_DENIED" in err_str):
-                print("    ⚠  File Permission/Access Error (403). Forcing re-upload on next attempt.")
-                has_forced_reupload = True
-                if pdf_file_path and pdf_file_path in _FILE_CACHE:
-                    del _FILE_CACHE[pdf_file_path]
-                time.sleep(2)
-                if attempt >= max_retries:
-                    raise RuntimeError(f"File access failed after {attempt} attempts: {err_str}")
-                continue
 
             delay = min(base_delay * (2 ** (attempt - 1)), max_delay)
 
             if "429" in err_str:
-                print(f"    ↳ Rate Limited (429) on attempt {attempt}. Waiting {delay}s...")
+                print(f"    ↳ Rate limited (429) on attempt {attempt}. Waiting {delay}s...")
                 time.sleep(delay)
                 if not retry_forever_on_rate_limit and attempt >= max_retries:
                     raise RuntimeError(f"Rate limit exceeded after {attempt} attempts: {err_str}")
                 continue
-            elif "Server disconnected" in err_str or "RemoteProtocolError" in err_str:
-                print(f"    ⚠  Network Timeout (Attempt {attempt}/{max_retries}). Retrying in {delay}s...")
+            elif "500" in err_str or "502" in err_str or "503" in err_str:
+                print(f"    ⚠  Server error on attempt {attempt}. Waiting {delay}s...")
                 time.sleep(delay)
-            elif "500" in err_str or "503" in err_str or "502" in err_str:
-                print(f"    ⚠  Server Error (Attempt {attempt}). Waiting {delay}s...")
-                time.sleep(delay)
-                if not retry_forever_on_rate_limit and attempt >= max_retries:
+                if attempt >= max_retries:
                     raise RuntimeError(f"Server error after {attempt} attempts: {err_str}")
                 continue
+            elif "Server disconnected" in err_str or "RemoteProtocolError" in err_str:
+                print(f"    ⚠  Network timeout (attempt {attempt}/{max_retries}). Retrying in {delay}s...")
+                time.sleep(delay)
             else:
-                print(f"    ⚠  API Error (Attempt {attempt}/{max_retries}): {err_str[:200]}")
+                print(f"    ⚠  API error (attempt {attempt}/{max_retries}): {err_str[:200]}")
                 time.sleep(min(delay, 30))
 
             if attempt >= max_retries:
-                raise RuntimeError(f"Gemini API call failed after {attempt} attempts. Last error: {err_str}")
+                raise RuntimeError(f"LLM call failed after {attempt} attempts. Last error: {err_str}")
 
 
 def save_output(content, filename, output_dir):
@@ -460,5 +306,3 @@ def merge_pdfs_python(main_pdf, supplement_source, output_dir=None):
         os.remove(output_path)
     shutil.move(temp_path, output_path)
     return output_path, page_info
-
-

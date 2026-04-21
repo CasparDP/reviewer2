@@ -21,12 +21,9 @@ import uuid as uuid_lib
 from pathlib import Path
 
 from pypdf import PdfReader, PdfWriter
-from reportlab.lib.pagesizes import letter
-from reportlab.lib.utils import simpleSplit
-from reportlab.pdfgen import canvas
 
 from reviewer2 import stages
-from reviewer2.core import USAGE_LOG, cleanup_resources, merge_pdfs_python
+from reviewer2.core import USAGE_LOG, _PDF_TEXT_CACHE, merge_pdfs_python
 from reviewer2.helpers import calculate_cost
 from reviewer2.render_text import render_text
 
@@ -56,6 +53,21 @@ class _Tee:
 # ---------------------------------------------------------------------------
 # Small helpers
 # ---------------------------------------------------------------------------
+
+
+def _docling_pdf(pdf_path: str) -> str:
+    """Convert a PDF to markdown via docling and return the text."""
+    try:
+        from docling.document_converter import DocumentConverter
+        converter = DocumentConverter()
+        result = converter.convert(pdf_path)
+        return result.document.export_to_markdown()
+    except ImportError:
+        print("  ⚠  docling not installed — PDF text will not be available to LLM stages.")
+        return ""
+    except Exception as e:
+        print(f"  ⚠  docling conversion failed for {pdf_path}: {e}")
+        return ""
 
 
 def _generate_filename_slug(authors: str | None, title: str | None, job_uuid: str) -> str:
@@ -213,7 +225,6 @@ def run(
             calculate_cost(USAGE_LOG)
         except Exception as e:
             print(f"  ⚠ Cost report failed (non-fatal): {e}")
-        cleanup_resources()
         sys.stdout = original_stdout
         sys.stderr = original_stderr
         log_file.close()
@@ -308,6 +319,14 @@ def _run_inner(
         finally:
             if staging.exists():
                 shutil.rmtree(staging)
+
+    # -----------------------------------------------------------------------
+    # DOCLING: convert PDF(s) to markdown and populate the text cache
+    # -----------------------------------------------------------------------
+    if str(target_file) not in _PDF_TEXT_CACHE:
+        print("  → Converting PDF to markdown (docling)...")
+        _PDF_TEXT_CACHE[str(target_file)] = _docling_pdf(str(target_file))
+        print(f"  ✓ Cached {len(_PDF_TEXT_CACHE[str(target_file)])} chars of PDF text.")
 
     # -----------------------------------------------------------------------
     # METADATA

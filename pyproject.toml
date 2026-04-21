@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "reviewer2"
 version = "1.0.1"
-description = "Adversarial peer review pipeline for academic PDFs, powered by Google Gemini."
+description = "Adversarial peer review pipeline for academic PDFs."
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "Apache-2.0"}
 authors = [{name = "The Catalogue of Errors Ltd"}]
-keywords = ["peer-review", "llm", "gemini", "academic", "pdf"]
+keywords = ["peer-review", "llm", "academic", "pdf"]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Science/Research",
@@ -25,13 +25,23 @@ classifiers = [
     "Topic :: Text Processing",
 ]
 dependencies = [
-    "google-genai",
     "pypdf",
     "requests",
     "tiktoken>=0.7.0",
+    "pyyaml>=6.0",
+    "openai>=1.0",
+    "pydantic>=2.0",
+    "python-dotenv (>=1.2.2,<2.0.0)",
 ]
 
 [project.optional-dependencies]
+gemini = [
+    "google-genai",
+]
+# docling (PDF-to-markdown) is not listed here because its torch transitive
+# dependency makes automated resolution fragile. Install it separately:
+#   pip install docling
+# The pipeline degrades gracefully if docling is absent.
 dev = [
     "pytest",
     "ruff",
@@ -41,9 +51,9 @@ dev = [
 reviewer2 = "reviewer2.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/isitcredible/reviewer2"
-Issues = "https://github.com/isitcredible/reviewer2/issues"
-Source = "https://github.com/isitcredible/reviewer2"
+Homepage = "https://github.com/CasparDP/reviewer2"
+Issues = "https://github.com/CasparDP/reviewer2/issues"
+Source = "https://github.com/CasparDP/reviewer2"
 
 [tool.setuptools.packages.find]
 where = ["src"]

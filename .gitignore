@@ -43,3 +43,6 @@ work/
 # Agent configs (local only)
 .claude/
 GEMINI.md
+
+pw_btspeaker-5.pdf
+smoke_test

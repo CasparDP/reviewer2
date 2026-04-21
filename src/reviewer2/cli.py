@@ -13,7 +13,7 @@ from pathlib import Path
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="reviewer2",
-        description="Adversarial peer review for academic PDFs, powered by Google Gemini.",
+        description="Adversarial peer review for academic PDFs.",
     )
     parser.add_argument("pdf", help="Path to the PDF to review.")
     parser.add_argument(
@@ -21,14 +21,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output text file path. Default: report.txt",
     )
 
+    # ---- review add-ons ----
     parser.add_argument(
         "--math", action="store_true",
         help="Enable the math-audit stages. Requires MATHPIX_APP_ID and MATHPIX_APP_KEY.",
     )
     parser.add_argument(
         "--code-dir", default=None, metavar="PATH",
-        help="Path to a directory of replication source code. Passing this "
-             "flag enables the code-audit add-on (off by default).",
+        help="Path to a directory of replication source code. Enables the code-audit add-on.",
     )
     parser.add_argument(
         "--no-copyedit", action="store_true",
@@ -36,9 +36,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--no-editor-note", action="store_true",
-        help="Skip the editor's-note stage (the Alchemist's revision advice). "
-             "In this release, copyedit and editor's note are coupled: disabling "
-             "either skips all Writer-Mode stages.",
+        help="Skip the editor's-note stage. Disabling either copyedit or editor's note "
+             "skips all Writer-Mode stages.",
     )
     parser.add_argument(
         "--base", action="store_true",
@@ -50,23 +49,47 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--citation", default="",
-        help="Manual citation string, used only if metadata extraction fails to produce one.",
+        help="Manual citation string, used only if metadata extraction fails.",
     )
 
+    # ---- run control ----
     parser.add_argument(
         "--work-dir", default=None,
-        help="Directory for intermediate stage outputs. Default: a temp dir that is "
-             "cleaned up on success. Pass an explicit path to keep the outputs or to "
-             "resume a previous run.",
+        help="Directory for intermediate stage outputs. Default: a temp dir cleaned up on "
+             "success. Pass an explicit path to keep outputs or resume a previous run.",
     )
     parser.add_argument(
         "--keep-work-dir", action="store_true",
-        help="Keep the intermediate stage outputs after the run completes.",
+        help="Keep intermediate stage outputs after the run completes.",
     )
     parser.add_argument(
         "--skip-size-check", action="store_true",
         help="Bypass the 500-page combined-volume circuit breaker.",
     )
+
+    # ---- LLM provider ----
+    parser.add_argument(
+        "--config", default=None, metavar="PATH",
+        help="Path to a reviewer2.yaml config file. Defaults to ./reviewer2.yaml or "
+             "~/.config/reviewer2/config.yaml.",
+    )
+    parser.add_argument(
+        "--base-url", default=None, metavar="URL",
+        help="Override the LLM provider base URL (e.g. https://api.openai.com/v1).",
+    )
+    parser.add_argument(
+        "--model", default=None, metavar="MODEL",
+        help="Set both fast and strong model tiers to MODEL.",
+    )
+    parser.add_argument(
+        "--fast-model", default=None, metavar="MODEL",
+        help="Override the fast-tier model (used for metadata, formatting stages).",
+    )
+    parser.add_argument(
+        "--strong-model", default=None, metavar="MODEL",
+        help="Override the strong-tier model (used for breaker, reviewer, math stages).",
+    )
+
     return parser
 
 
@@ -97,11 +120,34 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: PDF not found: {pdf_path}", file=sys.stderr)
         return 2
 
-    _require_env("GEMINI_API_KEY", "for Gemini API access")
     addons = resolve_addons(args)
     if addons["math"]:
         _require_env("MATHPIX_APP_ID", "for the --math add-on")
         _require_env("MATHPIX_APP_KEY", "for the --math add-on")
+
+    # Apply CLI provider overrides as env vars so load_config() picks them up.
+    if args.base_url:
+        os.environ["REVIEWER2_BASE_URL"] = args.base_url
+    if args.model:
+        os.environ["REVIEWER2_FAST_MODEL"] = args.model
+        os.environ["REVIEWER2_STRONG_MODEL"] = args.model
+    if args.fast_model:
+        os.environ["REVIEWER2_FAST_MODEL"] = args.fast_model
+    if args.strong_model:
+        os.environ["REVIEWER2_STRONG_MODEL"] = args.strong_model
+
+    # Load config now and inject into core so all stages share the same instance.
+    from reviewer2.config import load_config
+    import reviewer2.core as _core
+    _core._config = load_config(args.config)
+
+    if not _core._config.provider.api_key:
+        print(
+            "warning: REVIEWER2_API_KEY not set. Requests will likely fail unless "
+            "the provider does not require authentication.",
+            file=sys.stderr,
+        )
+
     output_path = Path(args.output).expanduser().resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -113,7 +159,7 @@ def main(argv: list[str] | None = None) -> int:
         work_dir = Path(tempfile.mkdtemp(prefix="reviewer2_"))
         cleanup_work_dir = not args.keep_work_dir
 
-    # Defer import to keep --help fast and avoid pulling in genai unnecessarily.
+    # Defer pipeline import to keep --help fast.
     from reviewer2.pipeline import PipelineError, run
 
     try:
