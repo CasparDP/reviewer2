@@ -3,17 +3,18 @@
 ## Running the pipeline from Claude Code
 
 **Before invoking `reviewer2` on a real paper, confirm with the user.** A
-default run takes 15–45 minutes and costs a few dollars in Gemini API
-usage. That is not a routine command to fire off autonomously.
+default run with Ollama Cloud (kimi-k2.5) takes 2–4 hours. With Gemini it
+was 15–45 minutes. That is not a routine command to fire off autonomously.
 
 Entry point:
 
 ```bash
-reviewer2 paper.pdf -o report.txt
+poetry run reviewer2 paper.pdf -o report.txt
 ```
 
-Requires `GEMINI_API_KEY` in the environment and `qpdf` on `PATH`. Install
-for development with `pip install -e .` from the repo root.
+Requires `REVIEWER2_API_KEY` in the environment — put it in `.env` at the
+repo root (gitignored, auto-loaded). Requires `qpdf` on `PATH`. Install
+for development with `poetry install`.
 
 Because runs are long, start them with `run_in_background: true` rather
 than foreground. Outputs stream to the working directory (default: a temp
@@ -24,6 +25,28 @@ Flags worth knowing: `--math` needs `MATHPIX_APP_ID` and
 `MATHPIX_APP_KEY`; `--code-dir PATH` enables the replication-code audit;
 `--base` disables all add-ons for the cheapest real run; the 500-page
 volume circuit breaker is overridden with `--skip-size-check`.
+
+New provider flags: `--model`, `--fast-model`, `--strong-model`,
+`--base-url`, `--config`.
+
+## Dev / testing gotchas
+
+**Isolated module imports:** `__init__.py` chains pipeline → stages →
+reportlab, so `from reviewer2.config import ...` fails unless reportlab is
+installed. Load modules in isolation with
+`importlib.util.spec_from_file_location` or bypass via
+`sys.path.insert(0, 'src')` with direct imports.
+
+**docling:** cannot be added via `poetry add` (torch transitive dep
+conflict). Install separately: `pip install docling`. Pipeline works
+without it via graceful fallback.
+
+**Large-scale stage edits:** use a `python3 -<<'EOF'` heredoc with regex
+rather than individual Edit calls — stages.py has 30+ identical call
+patterns.
+
+**v2 migration status:** complete. The planning section below is kept for
+reference only.
 
 ## Versioning
 
@@ -45,7 +68,7 @@ Breaking changes in the OSS port → `v2.0.0` (the README promises this).
 
 ## v2 migration: model-agnostic LLM backend
 
-**Status:** planned, not yet started.
+**Status:** complete.
 
 **Goal:** Replace the hard Gemini dependency with a provider-agnostic backend
 using the OpenAI SDK. Default to Ollama Cloud. Keep Gemini (and any other
