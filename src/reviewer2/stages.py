@@ -51,6 +51,23 @@ def _rainer_search_block(query: str, top_k: int = 10) -> str:
         print(f"  ⚠  rainer search failed (non-fatal): {e}")
         return ""
 
+def _extract_search_query(issues_text: str) -> str:
+    """Use the fast LLM to extract a focused web search query from a list of paper issues."""
+    prompt = (
+        "You are a research assistant. Given the following list of potential issues identified "
+        "in an academic paper, write a single focused web search query (10-15 words) that would "
+        "find methodological or empirical literature relevant to the most important issue. "
+        "Output only the query string, nothing else.\n\n"
+        f"{issues_text[:2000]}"
+    )
+    try:
+        query = call_llm(prompt, model_type="flash_2_5", temperature=0.0, step="web_search_query")
+        return query.strip()
+    except Exception as e:
+        print(f"  ⚠  query extraction failed, falling back to raw text: {e}")
+        return issues_text[:500]
+
+
 def _web_search_block(query: str, max_results: int = 5) -> str:
     """Return a formatted block of web search results from Ollama, or '' on failure."""
     api_key = os.getenv("REVIEWER2_API_KEY")
@@ -729,7 +746,8 @@ def stage_03b_external(pdf_path, list_v1, metadata, output_dir):
     if rainer_block:
         prompt = prompt + "\n\n" + rainer_block
 
-    web_block = _web_search_block(list_v1)
+    web_query = _extract_search_query(list_v1)
+    web_block = _web_search_block(web_query)
     if web_block:
         prompt = prompt + "\n\n" + web_block
 
