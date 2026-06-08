@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import os
 
+import requests
+
 from reviewer2.core import call_llm, load_prompt, save_output
 from reviewer2.helpers import (
     extract_info_fields,
@@ -48,6 +50,35 @@ def _rainer_search_block(query: str, top_k: int = 10) -> str:
     except Exception as e:
         print(f"  ⚠  rainer search failed (non-fatal): {e}")
         return ""
+
+def _web_search_block(query: str, max_results: int = 5) -> str:
+    """Return a formatted block of web search results from Ollama, or '' on failure."""
+    api_key = os.getenv("REVIEWER2_API_KEY")
+    if not api_key:
+        return ""
+    try:
+        resp = requests.post(
+            "https://ollama.com/api/web_search",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={"query": query[:500], "max_results": max_results},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        results = resp.json().get("results", [])
+        if not results:
+            return ""
+        lines = ["<web_search_results>"]
+        for r in results:
+            title = r.get("title", "")
+            url = r.get("url", "")
+            content = (r.get("content", ""))[:500]
+            lines.append(f"- [{title}]({url})\n  {content}")
+        lines.append("</web_search_results>")
+        return "\n".join(lines)
+    except Exception as e:
+        print(f"  ⚠  web search failed (non-fatal): {e}")
+        return ""
+
 
 APPENDIX_INJECTION = """
 
@@ -697,6 +728,10 @@ def stage_03b_external(pdf_path, list_v1, metadata, output_dir):
     rainer_block = _rainer_search_block(list_v1)
     if rainer_block:
         prompt = prompt + "\n\n" + rainer_block
+
+    web_block = _web_search_block(list_v1)
+    if web_block:
+        prompt = prompt + "\n\n" + web_block
 
     result = call_llm(prompt, pdf_path, model_type="flash_2_5", temperature=0.0, system_instruction=load_instruction("bureaucrat.txt"), step="03b_external")
     save_output(result, "03b_external.txt", output_dir)

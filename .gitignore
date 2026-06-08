@@ -49,3 +49,4 @@ smoke_test
 # Ignore all report files, but not the directory itself
 report.txt
 report*
+*.txt
